@@ -15,8 +15,8 @@ import (
 
 // This is an example that shows how to publish and subscribe to a WAVEMQ site router
 // Fill these fields in:
-const EntityFile = "entity.ent"
-const Namespace = "GyAlyQyfJuai4MCyg6Rx9KkxnZZXWyDaIo0EXGY9-WEq6w=="
+const EntityFile = "service.ent"
+const Namespace = "GyBceT0ykjvV9FsfgW_l1vhJA1YmQYXE86nl9XnkTzu9Kw=="
 const SiteRouter = "127.0.0.1:4516"
 
 var namespaceBytes []byte

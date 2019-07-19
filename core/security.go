@@ -24,6 +24,7 @@ import (
 	"github.com/immesys/wave/storage/overlay"
 	"github.com/immesys/wave/waved"
 	"github.com/immesys/wave/wve"
+	"github.com/immesys/wavemq/jedi"
 	pb "github.com/immesys/wavemq/mqpb"
 	"golang.org/x/crypto/sha3"
 )
@@ -61,6 +62,9 @@ type AuthModule struct {
 	//Hash of perspective DER -> public entity hash
 	phashcachemu sync.RWMutex
 	phashcache   map[uint32][]byte
+
+	// state for JEDI
+	jediState *jedi.State
 }
 
 type icacheKey struct {
@@ -111,6 +115,7 @@ func NewAuthModule(cfg *waved.Configuration) (*AuthModule, error) {
 		bcache:        make(map[bcacheKey]*bcacheItem),
 		routingProofs: make(map[string][]byte),
 		phashcache:    make(map[uint32][]byte),
+		jediState:     jedi.NewState(eapi),
 	}, nil
 }
 
@@ -707,7 +712,13 @@ func (am *AuthModule) FormMessage(p *pb.PublishParams, routerID string) (*pb.Mes
 	}
 
 	encryptedPayload := p.Content
-	if p.EncryptionPartition != nil {
+	if p.JediOptions != nil {
+		if encrypted, err := am.jediState.Encrypt(p); err != nil {
+			return nil, wve.ErrW(wve.MessageEncryptionError, "failed to encrypt", err)
+		} else {
+			encryptedPayload = encrypted
+		}
+	} else if p.EncryptionPartition != nil {
 		chunks := []string{}
 		for _, chunk := range p.EncryptionPartition {
 			chunks = append(chunks, string(chunk))

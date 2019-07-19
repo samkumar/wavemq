@@ -94,8 +94,14 @@ message PublishParams{
   bool persist = 6;
   //If specified, this proof will be used instead of building one
   bytes customProofDER = 7;
-
+  // Options for JEDI E2EE
+  JEDIOptions jediOptions = 8;
 }
+
+message JEDIOptions {
+  uint32 partitionSize = 1;
+}
+
 message PublishResponse{
   Error error = 1;
 }
@@ -123,7 +129,9 @@ message PayloadObject {
   string schema = 1;
   bytes content = 2;
 }
-
+message Payload {
+  repeated PayloadObject objects = 1;
+}
 message SubscribeParams {
   Perspective perspective = 1;
   bytes namespace = 2;
