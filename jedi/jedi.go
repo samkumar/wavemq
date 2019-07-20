@@ -4,16 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
-	"unsafe"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/immesys/wave/eapi"
@@ -22,147 +17,27 @@ import (
 	"github.com/immesys/wave/iapi"
 	"github.com/immesys/wavemq/mqpb"
 	"github.com/samkumar/reqcache"
-	"github.com/ucbrise/jedi-pairing/lang/go/bls12381"
 	"github.com/ucbrise/jedi-pairing/lang/go/cryptutils"
 	"github.com/ucbrise/jedi-pairing/lang/go/wkdibe"
 )
-
-// AESKeySize is the key size to use with AES, in bytes.
-const AESKeySize = 16
-
-// NamespaceParamsCacheSize is the size (in bytes) of the cache of namespace
-// parameters.
-const NamespaceParamsCacheSize = (32 << 20)
 
 // MaxURIComponents is the maximum number of components in a URI.
 const MaxURIComponents = 11
 
 // State stores the state used by JEDI for end-to-end encryption.
 type State struct {
-	cache *reqcache.LRUCache
-}
-
-// CacheEntry stores cached data to accelerate encryption for certain URIs.
-type CacheEntry struct {
-	lock         sync.RWMutex
-	lastUpdated  time.Time
-	slots        [][]byte
-	pattern      wkdibe.AttributeList
-	key          [AESKeySize]byte
-	encryptedKey *wkdibe.Ciphertext
-	precomputed  *wkdibe.PreparedAttributeList
-}
-
-/* Key type identifiers for cache. */
-const (
-	KeyTypeURI = iota
-	KeyTypeNamespace
-)
-
-func nskey(ns []byte) string {
-	var b strings.Builder
-	b.WriteByte(KeyTypeNamespace)
-	b.Write(ns)
-	return b.String()
-}
-
-func urikey(ns []byte, uri [][]byte) string {
-	var b strings.Builder
-	b.WriteByte(KeyTypeURI)
-
-	var buffer [4]byte
-	binary.LittleEndian.PutUint32(buffer[:], uint32(len(ns)))
-
-	b.Write(buffer[:])
-	b.Write(ns)
-
-	for _, component := range uri {
-		b.Write(component)
-		b.WriteByte('/')
-	}
-
-	return b.String()
-}
-
-func parsekey(key string) (keytype byte, ns []byte) {
-	keybytes := []byte(key)
-	keytype = keybytes[0]
-	switch keytype {
-	case KeyTypeNamespace:
-		ns = keybytes[1:]
-	case KeyTypeURI:
-		nslen := binary.LittleEndian.Uint32(keybytes[1:5])
-		ns = keybytes[5 : 5+nslen]
-		// 	start := int(5 + nslen)
-		// 	end := start
-		// outerloop:
-		// 	for {
-		// 		for key[end] != '/' {
-		// 			end++
-		// 			if end == len(key) {
-		// 				break outerloop
-		// 			}
-		// 		}
-		// 		uri = append(uri, keybytes[start:end])
-		// 		end++
-		// 		start = end
-		// 	}
-	}
-	return
+	cache  *reqcache.LRUCache
+	engine *engine.Engine
+	wave   *eapi.EAPI
 }
 
 // NewState creates a new JEDI context for end-to-end encryption.
 func NewState(wave *eapi.EAPI) *State {
 	eng := wave.GetEngineNoPerspective()
-
-	var cache *reqcache.LRUCache
-	cache = reqcache.NewLRUCache(NamespaceParamsCacheSize,
-		func(ctx context.Context, key interface{}) (interface{}, uint64, error) {
-			keytype, namespacebytes := parsekey(key.(string))
-			switch keytype {
-			case KeyTypeNamespace:
-				/* Get the namespace entity. */
-				namespace, err := lookupEntity(eng, namespacebytes, nil)
-				if err != nil {
-					return nil, 0, err
-				}
-
-				/* Get the WKD-IBE public parameters from the namespace entity. */
-				params := new(wkdibe.Params)
-				var size uint64
-				for _, kr := range namespace.Keys {
-					wrapped, ok := kr.(*iapi.EntityKey_OAQUE_BLS12381_S20_Params)
-					if ok {
-						marshalled := wrapped.SerdesForm.Key.Content.([]byte)
-						if !params.Unmarshal(marshalled, true, false) {
-							continue
-						}
-						size = uint64(unsafe.Sizeof(params)) +
-							uint64(uintptr(params.NumAttributes())*unsafe.Sizeof(bls12381.G1Zero))
-						break
-					}
-				}
-				if size == 0 {
-					return nil, 0, errors.New("namespace lacks WKD-IBE params")
-				}
-
-				return params, size, nil
-			case KeyTypeURI:
-				entry := new(CacheEntry)
-				/*
-				 * Since these cache entries are mutable anyway, we just rely
-				 * on an internal lock (needed for mutability) for
-				 * initialization.
-				 */
-				size := unsafe.Sizeof(entry) + unsafe.Sizeof(*entry.encryptedKey) + unsafe.Sizeof(*entry.precomputed)
-				return entry, uint64(size), nil
-			default:
-				panic(fmt.Sprintf("Unknown key type: %d", int(keytype)))
-			}
-		}, func(evicted []*reqcache.LRUCacheEntry) {
-		})
 	return &State{
-		cache: cache,
+		cache:  NewCache(eng),
+		engine: eng,
+		wave:   wave,
 	}
 }
 
@@ -187,20 +62,6 @@ func lookupEntity(eng *engine.Engine, namespace []byte, location *pb.Location) (
 		return nil, errors.New("namespace entity is no longer valid")
 	}
 	return ns, nil
-}
-
-func aesCTREncryptInMem(dst []byte, src []byte, key []byte) error {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return err
-	}
-	iv := dst[:aes.BlockSize]
-	if _, err = rand.Read(iv); err != nil {
-		return err
-	}
-	stream := cipher.NewCTR(block, iv)
-	stream.XORKeyStream(dst[aes.BlockSize:], src)
-	return nil
 }
 
 func parseURI(uri string) ([][]byte, error) {
@@ -373,8 +234,77 @@ func (s *State) Encrypt(p *mqpb.PublishParams) ([]*mqpb.PayloadObject, error) {
 	return []*mqpb.PayloadObject{keyPO, contentPO}, nil
 }
 
-func (s *State) Decrypt() {
-	// TODO
+// Decrypt decrypts a message's payload using JEDI
+func (s *State) Decrypt(p *pb.Perspective, opt *mqpb.JEDIOptions, message []*mqpb.PayloadObject) ([]*mqpb.PayloadObject, error) {
+	ctx := context.Background()
+
+	pattern := make(wkdibe.AttributeList)
+	for i, slot := range opt.GetSlots() {
+		if len(slot) != 0 {
+			pattern[wkdibe.AttributeIndex(i)] = cryptutils.HashToZp(new(big.Int), slot)
+		}
+	}
+
+	if message[0].GetSchema() != "jedi:encryptedkey" {
+		panic("First PO has wrong schema")
+	}
+
+	ciphertext := new(wkdibe.Ciphertext)
+	if !ciphertext.Unmarshal(message[0].GetContent(), true, false) {
+		panic("Could not unmarshal ciphertext")
+	}
+
+	eng, werr := s.wave.GetEngine(ctx, p)
+	if werr != nil {
+		return nil, werr.Cause()
+	}
+	//secret := eng.Perspective()
+	// slottedSecretKey, err := secret.WR1BodyKey(ctx, opt.GetSlots(), false)
+	dctx := engine.NewEngineDecryptionContext(eng)
+	dctx.AutoLoadPartitionSecrets(true)
+
+	var found bool
+	secretkey := new(wkdibe.SecretKey)
+	err := dctx.WR1OAQUEKeysForContent(ctx, iapi.HashSchemeInstanceFromMultihash(opt.GetNamespace()), false, opt.GetSlots(), func(k iapi.SlottedSecretKey) bool {
+		wrapped, ok := k.(*iapi.EntitySecretKey_OAQUE_BLS12381_S20)
+		if ok {
+			marshalled := wrapped.SerdesForm.Private.Content.([]byte)
+			if !secretkey.Unmarshal(marshalled, true, false) {
+				return true
+			}
+			secretkey = wkdibe.NonDelegableQualifyKey(wrapped.Params, secretkey, pattern)
+			found = true
+			return false
+		}
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		panic("Could not find suitable key to decrypt")
+	}
+
+	encryptable := wkdibe.Decrypt(ciphertext, secretkey)
+	key := encryptable.HashToSymmetricKey(make([]byte, AESKeySize))
+
+	fmt.Printf("Got symmetric key: %v\n", key)
+	if message[1].GetSchema() != "jedi:contents" {
+		panic("Second PO has wrong schema")
+	}
+	encrypted := message[1].GetContent()
+	decrypted := make([]byte, len(encrypted)-aes.BlockSize)
+	err = aesCTRDecryptInMem(decrypted, encrypted, key)
+	if err != nil {
+		return nil, err
+	}
+	payload := new(mqpb.Payload)
+	err = proto.Unmarshal(decrypted, payload)
+	if err != nil {
+		return nil, err
+	}
+
+	return payload.GetObjects(), nil
 }
 
 func (s *State) Sign() {

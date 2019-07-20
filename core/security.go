@@ -547,7 +547,13 @@ func (am *AuthModule) PrepareMessage(persp *pb.Perspective, m *pb.Message) (*pb.
 		},
 	}
 	decryptedPayload := m.Tbs.Payload
-	if m.EncryptionPartition != nil {
+	if m.GetJediOptions() != nil {
+		var err error
+		decryptedPayload, err = am.jediState.Decrypt(perspective, m.GetJediOptions(), m.GetTbs().GetPayload())
+		if err != nil {
+			return nil, wve.ErrW(wve.MessageDecryptionError, "JEDI decryption failed", err)
+		}
+	} else if m.EncryptionPartition != nil {
 		decryptedPayload = []*pb.PayloadObject{}
 		for _, po := range m.Tbs.Payload {
 			decresp, err := am.wave.DecryptMessage(context.Background(), &eapipb.DecryptMessageParams{
@@ -714,7 +720,7 @@ func (am *AuthModule) FormMessage(p *pb.PublishParams, routerID string) (*pb.Mes
 	encryptedPayload := p.Content
 	if p.JediOptions != nil {
 		if encrypted, err := am.jediState.Encrypt(p); err != nil {
-			return nil, wve.ErrW(wve.MessageEncryptionError, "failed to encrypt", err)
+			return nil, wve.ErrW(wve.MessageEncryptionError, "JEDI encryption failed", err)
 		} else {
 			encryptedPayload = encrypted
 		}
@@ -778,6 +784,7 @@ func (am *AuthModule) FormMessage(p *pb.PublishParams, routerID string) (*pb.Mes
 			Payload:      encryptedPayload,
 			OriginRouter: routerID,
 		},
+		JediOptions: p.JediOptions,
 	}, nil
 }
 

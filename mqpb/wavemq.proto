@@ -100,6 +100,8 @@ message PublishParams{
 
 message JEDIOptions {
   uint32 partitionSize = 1;
+  repeated bytes slots = 2;
+  bytes namespace = 3;
 }
 
 message PublishResponse{
@@ -124,6 +126,7 @@ message Message {
   repeated int64 drops = 7;
   bool persist = 8;
   bytes proofHash = 9;
+  JEDIOptions jediOptions = 10;
 }
 message PayloadObject {
   string schema = 1;
