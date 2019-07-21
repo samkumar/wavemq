@@ -169,9 +169,7 @@ func TestParseURI(t *testing.T) {
 	}
 }
 
-func TestEncrypt(t *testing.T) {
-	state := NewState(wave)
-
+func encryptThenDecrypt(state *State, t *testing.T) {
 	opt := &mqpb.JEDIOptions{
 		PartitionSize: 2,
 	}
@@ -213,4 +211,14 @@ func TestEncrypt(t *testing.T) {
 		t.Log("Second payload object is different after encryption and decryption")
 		t.Fail()
 	}
+}
+
+func TestEncryptDecrypt(t *testing.T) {
+	state := NewState(wave)
+
+	/* Run the test. */
+	encryptThenDecrypt(state, t)
+
+	/* Run the test agin to test the cached path. */
+	encryptThenDecrypt(state, t)
 }

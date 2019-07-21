@@ -34,10 +34,18 @@ type CacheEntry struct {
 	precomputed  *wkdibe.PreparedAttributeList
 }
 
+// CiphertextEntry stores the cached decryption of a ciphertext.
+type CiphertextEntry struct {
+	lock      sync.RWMutex
+	decrypted [AESKeySize]byte
+	populated bool
+}
+
 /* Key type identifiers for cache. */
 const (
 	KeyTypeURI = iota
 	KeyTypeNamespace
+	KeyTypeCiphertext
 )
 
 func nskey(ns []byte) string {
@@ -65,29 +73,24 @@ func urikey(ns []byte, uri [][]byte) string {
 	return b.String()
 }
 
-func parsekey(key string) (keytype byte, ns []byte) {
+func ctkey(ciphertext []byte) string {
+	var b strings.Builder
+	b.WriteByte(KeyTypeCiphertext)
+	b.Write(ciphertext)
+	return b.String()
+}
+
+func parsekey(key string) (keytype byte, content []byte) {
 	keybytes := []byte(key)
 	keytype = keybytes[0]
 	switch keytype {
 	case KeyTypeNamespace:
-		ns = keybytes[1:]
+		content = keybytes[1:]
 	case KeyTypeURI:
 		nslen := binary.LittleEndian.Uint32(keybytes[1:5])
-		ns = keybytes[5 : 5+nslen]
-		// 	start := int(5 + nslen)
-		// 	end := start
-		// outerloop:
-		// 	for {
-		// 		for key[end] != '/' {
-		// 			end++
-		// 			if end == len(key) {
-		// 				break outerloop
-		// 			}
-		// 		}
-		// 		uri = append(uri, keybytes[start:end])
-		// 		end++
-		// 		start = end
-		// 	}
+		content = keybytes[5 : 5+nslen]
+	case KeyTypeCiphertext:
+		content = keybytes[1:]
 	}
 	return
 }
@@ -119,11 +122,12 @@ func lookupEntity(eng *engine.Engine, namespace []byte, location *pb.Location) (
 func NewCache(eng *engine.Engine) *reqcache.LRUCache {
 	return reqcache.NewLRUCache(CacheSize,
 		func(ctx context.Context, key interface{}) (interface{}, uint64, error) {
-			keytype, namespacebytes := parsekey(key.(string))
+			keystring := key.(string)
+			keytype, contentbytes := parsekey(keystring)
 			switch keytype {
 			case KeyTypeNamespace:
 				/* Get the namespace entity. */
-				namespace, err := lookupEntity(eng, namespacebytes, nil)
+				namespace, err := lookupEntity(eng, contentbytes, nil)
 				if err != nil {
 					return nil, 0, err
 				}
@@ -147,7 +151,7 @@ func NewCache(eng *engine.Engine) *reqcache.LRUCache {
 					return nil, 0, errors.New("namespace lacks WKD-IBE params")
 				}
 
-				return params, size, nil
+				return params, uint64(len(keystring)) + size, nil
 			case KeyTypeURI:
 				entry := new(CacheEntry)
 				/*
@@ -156,7 +160,20 @@ func NewCache(eng *engine.Engine) *reqcache.LRUCache {
 				 * initialization.
 				 */
 				size := unsafe.Sizeof(entry) + unsafe.Sizeof(*entry.encryptedKey) + unsafe.Sizeof(*entry.precomputed)
-				return entry, uint64(size), nil
+				return entry, uint64(len(keystring)) + uint64(size), nil
+			case KeyTypeCiphertext:
+				entry := new(CiphertextEntry)
+				/*
+				 * We don't populate it here because, if there's an error, we
+				 * want another thread to be able to try. This could happen if
+				 * a malicious party "steals" an honest party's ciphertext and
+				 * tries to have an honest subscriber decrypt it with the wrong
+				 * URI/time combo. Unless we have a cached decryption, we want
+				 * all threads to try, even if a different thread has
+				 * previously encountered a failure or error.
+				 */
+				size := unsafe.Sizeof(entry)
+				return entry, uint64(len(keystring)) + uint64(size), nil
 			default:
 				panic(fmt.Sprintf("Unknown key type: %d", int(keytype)))
 			}

@@ -57,6 +57,16 @@ func parseURI(uri string) ([][]byte, error) {
 	return uribytes, nil
 }
 
+func resyncGraphBlocking(ctx context.Context, eng *engine.Engine) error {
+	err := eng.ResyncEntireGraph(ctx)
+	if err != nil {
+		return err
+	}
+	waitchan := eng.WaitForEmptySyncQueue()
+	<-waitchan
+	return nil
+}
+
 // Encrypt encrypts a message's payload using JEDI.
 func (s *State) Encrypt(p *mqpb.PublishParams) ([]*mqpb.PayloadObject, error) {
 	var err error
@@ -252,53 +262,88 @@ func (s *State) Decrypt(p *pb.Perspective, opt *mqpb.JEDIOptions, message []*mqp
 	if message[0].GetSchema() != "jedi:encryptedkey" {
 		panic("First PO has wrong schema")
 	}
+	marshalledCT := message[0].GetContent()
 
-	ciphertext := new(wkdibe.Ciphertext)
-	if !ciphertext.Unmarshal(message[0].GetContent(), true, false) {
-		panic("Could not unmarshal ciphertext")
-	}
-
-	eng, werr := s.wave.GetEngine(ctx, p)
-	if werr != nil {
-		return nil, werr.Cause()
-	}
-
-	/* Sync the graph. */
-	uerr := eng.ResyncEntireGraph(ctx)
-	if uerr != nil {
-		return nil, uerr
-	}
-	waitchan := eng.WaitForEmptySyncQueue()
-	<-waitchan
-
-	dctx := engine.NewEngineDecryptionContext(eng)
-	dctx.AutoLoadPartitionSecrets(true)
-
-	var secretkey *wkdibe.SecretKey
-	err := dctx.WR1OAQUEKeysForContent(ctx, iapi.HashSchemeInstanceFromMultihash(opt.GetNamespace()), false, opt.GetSlots(), func(k iapi.SlottedSecretKey) bool {
-		wrapped, ok := k.(*iapi.EntitySecretKey_OAQUE_BLS12381_S20)
-		if ok {
-			secretkey = wkdibe.NonDelegableQualifyKey(wrapped.Params, wrapped.PrivateKey, pattern)
-			return false
-		}
-		return true
-	})
+	/* Check if we've cached the decryption of this ciphertext. */
+	entryInt, err := s.cache.Get(ctx, ctkey(marshalledCT))
 	if err != nil {
 		return nil, err
 	}
-	if secretkey == nil {
-		panic("Could not find suitable key to decrypt")
-	}
+	entry := entryInt.(*CiphertextEntry)
 
-	encryptable := wkdibe.Decrypt(ciphertext, secretkey)
-	key := encryptable.HashToSymmetricKey(make([]byte, AESKeySize))
+	var key [AESKeySize]byte
+	entry.lock.RLock()
+	if entry.populated {
+		copy(key[:], entry.decrypted[:])
+		entry.lock.RUnlock()
+	} else {
+		entry.lock.RUnlock()
+		entry.lock.Lock()
+		/*
+		 * In case someone else populated it between RUnlock() and RLock(),
+		 * check again if the entry is populated.
+		 */
+		if entry.populated {
+			copy(key[:], entry.decrypted[:])
+		} else {
+			ciphertext := new(wkdibe.Ciphertext)
+			if !ciphertext.Unmarshal(marshalledCT, true, false) {
+				entry.lock.Unlock()
+				return nil, errors.New("malformed ciphertext")
+			}
+
+			eng, werr := s.wave.GetEngine(ctx, p)
+			if werr != nil {
+				entry.lock.Unlock()
+				return nil, werr.Cause()
+			}
+
+			dctx := engine.NewEngineDecryptionContext(eng)
+			dctx.AutoLoadPartitionSecrets(true)
+
+			var synced bool
+			var secretkey *wkdibe.SecretKey
+		searchkey:
+			err = dctx.WR1OAQUEKeysForContent(ctx, iapi.HashSchemeInstanceFromMultihash(opt.GetNamespace()), false, opt.GetSlots(), func(k iapi.SlottedSecretKey) bool {
+				wrapped, ok := k.(*iapi.EntitySecretKey_OAQUE_BLS12381_S20)
+				if ok {
+					secretkey = wkdibe.NonDelegableQualifyKey(wrapped.Params, wrapped.PrivateKey, pattern)
+					return false
+				}
+				return true
+			})
+			if err != nil {
+				entry.lock.Unlock()
+				return nil, err
+			}
+			if secretkey == nil {
+				if synced {
+					entry.lock.Unlock()
+					return nil, errors.New("Could not find suitable decryption key")
+				}
+				err = resyncGraphBlocking(ctx, eng)
+				if err != nil {
+					entry.lock.Unlock()
+					return nil, err
+				}
+				synced = true
+				goto searchkey
+			}
+
+			encryptable := wkdibe.Decrypt(ciphertext, secretkey)
+			encryptable.HashToSymmetricKey(entry.decrypted[:])
+			copy(key[:], entry.decrypted[:])
+			entry.populated = true
+		}
+		entry.lock.Unlock()
+	}
 
 	if message[1].GetSchema() != "jedi:contents" {
 		panic("Second PO has wrong schema")
 	}
 	encrypted := message[1].GetContent()
 	decrypted := make([]byte, len(encrypted)-aes.BlockSize)
-	err = aesCTRDecryptInMem(decrypted, encrypted, key)
+	err = aesCTRDecryptInMem(decrypted, encrypted, key[:])
 	if err != nil {
 		return nil, err
 	}
