@@ -41,41 +41,19 @@ func NewState(wave *eapi.EAPI) *State {
 	}
 }
 
-func lookupEntity(eng *engine.Engine, namespace []byte, location *pb.Location) (*iapi.Entity, error) {
-	ctx := context.Background()
-	nsHash := iapi.HashSchemeInstanceFromMultihash(namespace)
-	if !nsHash.Supported() {
-		return nil, errors.New("could not parse namespace")
-	}
-	nsLoc, err := eapi.LocationSchemeInstance(location)
-	if err != nil {
-		return nil, fmt.Errorf("could not parse namespace location: %s", err.Error())
-	}
-	if nsLoc == nil {
-		nsLoc = iapi.SI().DefaultLocation(ctx)
-	}
-	ns, val, uerr := eng.LookupEntity(ctx, nsHash, nsLoc)
-	if uerr != nil {
-		return nil, fmt.Errorf("could not resolve namespace: %s", uerr.Error())
-	}
-	if !val.Valid {
-		return nil, errors.New("namespace entity is no longer valid")
-	}
-	return ns, nil
-}
-
 func parseURI(uri string) ([][]byte, error) {
 	components := strings.SplitN(uri, "/", MaxURIComponents+1)
 	if len(components) > MaxURIComponents {
 		return nil, fmt.Errorf("URI contains %d components (max %d)", len(components), MaxURIComponents)
 	}
-	uribytes := make([][]byte, len(components))
+	uribytes := make([][]byte, len(components)+1)
 	for i, comp := range components {
 		if len(comp) == 0 {
 			return nil, fmt.Errorf("URI contains empty component at index %d", i)
 		}
-		uribytes[i] = []byte(comp)
+		uribytes[i+1] = []byte(comp)
 	}
+	uribytes[0] = []byte{0, 'e', '2', 'e', 'e'}
 	return uribytes, nil
 }
 
@@ -115,6 +93,13 @@ func (s *State) Encrypt(p *mqpb.PublishParams) ([]*mqpb.PayloadObject, error) {
 	if werr != nil {
 		return nil, werr.Cause()
 	}
+
+	/* Set JEDI options. */
+	if p.GetJediOptions() == nil {
+		p.JediOptions = new(mqpb.JEDIOptions)
+	}
+	p.JediOptions.Namespace = p.GetNamespace()
+	p.JediOptions.Slots = slots
 
 	/*
 	 * Optimistically assume that our slots will be identical to the cached
@@ -158,41 +143,60 @@ func (s *State) Encrypt(p *mqpb.PublishParams) ([]*mqpb.PayloadObject, error) {
 	if !identical {
 		entry.lock.Lock()
 
-		/* Check if the entry was updated before we could grab entry.lock. */
-		if entry.lastUpdated.After(now) {
-			now = entry.lastUpdated
-			slots, werr = iapi.CalculateWR1Partition(now, now, uribytes)
-			if werr != nil {
-				entry.lock.RUnlock()
-				return nil, werr.Cause()
-			}
-		}
+		adjustedPrecomputed := false
 
-		/* Get the diff between our slots and the ones we have cached. */
-		for i, slot := range slots {
-			if !bytes.Equal(slot, entry.slots[i]) {
-				if pattern == nil {
-					/* This runs once if there's a diff. */
-					pattern = make(wkdibe.AttributeList)
-				}
-				if slot != nil {
+		/* Check if it's a new entry; if so, perform precomputation. */
+		if entry.slots == nil {
+			pattern = make(wkdibe.AttributeList)
+			for i, slot := range slots {
+				if len(slot) != 0 {
 					pattern[wkdibe.AttributeIndex(i)] = cryptutils.HashToZp(new(big.Int), slot)
 				}
 			}
-		}
-
-		/* Check if there's a diff now before proceeding. */
-		if pattern != nil {
-			/* Complete pattern by copying hashed elements. */
-			for j, hash := range entry.pattern {
-				i := int(j)
-				if bytes.Equal(slots[i], entry.slots[i]) {
-					pattern[j] = hash
+			entry.precomputed = wkdibe.PrepareAttributeList(params, pattern)
+			adjustedPrecomputed = true
+		} else {
+			/* Check if the entry was updated before we could grab entry.lock. */
+			if entry.lastUpdated.After(now) {
+				now = entry.lastUpdated
+				slots, werr = iapi.CalculateWR1Partition(now, now, uribytes)
+				if werr != nil {
+					entry.lock.RUnlock()
+					return nil, werr.Cause()
 				}
 			}
 
-			/* Adjust the precomputed value. */
-			wkdibe.AdjustPreparedAttributeList(entry.precomputed, params, entry.pattern, pattern)
+			/* Get the diff between our slots and the ones we have cached. */
+			for i, slot := range slots {
+				if !bytes.Equal(slot, entry.slots[i]) {
+					if pattern == nil {
+						/* This runs once if there's a diff. */
+						pattern = make(wkdibe.AttributeList)
+					}
+					if len(slot) != 0 {
+						pattern[wkdibe.AttributeIndex(i)] = cryptutils.HashToZp(new(big.Int), slot)
+					}
+				}
+			}
+
+			/* Check if there's a diff now before proceeding. */
+			if pattern != nil {
+				/* Complete pattern by copying hashed elements. */
+				for j, hash := range entry.pattern {
+					i := int(j)
+					if bytes.Equal(slots[i], entry.slots[i]) {
+						pattern[j] = hash
+					}
+				}
+
+				/* Adjust the precomputed value. */
+				wkdibe.AdjustPreparedAttributeList(entry.precomputed, params, entry.pattern, pattern)
+				adjustedPrecomputed = true
+			}
+		}
+
+		if adjustedPrecomputed {
+			/* Fill in the entry. */
 			entry.slots = slots
 			entry.pattern = pattern
 
@@ -258,22 +262,23 @@ func (s *State) Decrypt(p *pb.Perspective, opt *mqpb.JEDIOptions, message []*mqp
 	if werr != nil {
 		return nil, werr.Cause()
 	}
-	//secret := eng.Perspective()
-	// slottedSecretKey, err := secret.WR1BodyKey(ctx, opt.GetSlots(), false)
+
+	/* Sync the graph. */
+	uerr := eng.ResyncEntireGraph(ctx)
+	if uerr != nil {
+		return nil, uerr
+	}
+	waitchan := eng.WaitForEmptySyncQueue()
+	<-waitchan
+
 	dctx := engine.NewEngineDecryptionContext(eng)
 	dctx.AutoLoadPartitionSecrets(true)
 
-	var found bool
-	secretkey := new(wkdibe.SecretKey)
+	var secretkey *wkdibe.SecretKey
 	err := dctx.WR1OAQUEKeysForContent(ctx, iapi.HashSchemeInstanceFromMultihash(opt.GetNamespace()), false, opt.GetSlots(), func(k iapi.SlottedSecretKey) bool {
 		wrapped, ok := k.(*iapi.EntitySecretKey_OAQUE_BLS12381_S20)
 		if ok {
-			marshalled := wrapped.SerdesForm.Private.Content.([]byte)
-			if !secretkey.Unmarshal(marshalled, true, false) {
-				return true
-			}
-			secretkey = wkdibe.NonDelegableQualifyKey(wrapped.Params, secretkey, pattern)
-			found = true
+			secretkey = wkdibe.NonDelegableQualifyKey(wrapped.Params, wrapped.PrivateKey, pattern)
 			return false
 		}
 		return true
@@ -281,14 +286,13 @@ func (s *State) Decrypt(p *pb.Perspective, opt *mqpb.JEDIOptions, message []*mqp
 	if err != nil {
 		return nil, err
 	}
-	if !found {
+	if secretkey == nil {
 		panic("Could not find suitable key to decrypt")
 	}
 
 	encryptable := wkdibe.Decrypt(ciphertext, secretkey)
 	key := encryptable.HashToSymmetricKey(make([]byte, AESKeySize))
 
-	fmt.Printf("Got symmetric key: %v\n", key)
 	if message[1].GetSchema() != "jedi:contents" {
 		panic("Second PO has wrong schema")
 	}

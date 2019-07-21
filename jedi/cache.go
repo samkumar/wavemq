@@ -10,8 +10,11 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/immesys/wave/eapi"
+	"github.com/immesys/wave/eapi/pb"
 	"github.com/immesys/wave/engine"
 	"github.com/immesys/wave/iapi"
+	"github.com/immesys/wave/serdes"
 	"github.com/samkumar/reqcache"
 	"github.com/ucbrise/jedi-pairing/lang/go/bls12381"
 	"github.com/ucbrise/jedi-pairing/lang/go/wkdibe"
@@ -89,6 +92,29 @@ func parsekey(key string) (keytype byte, ns []byte) {
 	return
 }
 
+func lookupEntity(eng *engine.Engine, namespace []byte, location *pb.Location) (*iapi.Entity, error) {
+	ctx := context.Background()
+	nsHash := iapi.HashSchemeInstanceFromMultihash(namespace)
+	if !nsHash.Supported() {
+		return nil, errors.New("could not parse namespace")
+	}
+	nsLoc, err := eapi.LocationSchemeInstance(location)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse namespace location: %s", err.Error())
+	}
+	if nsLoc == nil {
+		nsLoc = iapi.SI().DefaultLocation(ctx)
+	}
+	ns, val, uerr := eng.LookupEntity(ctx, nsHash, nsLoc)
+	if uerr != nil {
+		return nil, fmt.Errorf("could not resolve namespace: %s", uerr.Error())
+	}
+	if !val.Valid {
+		return nil, errors.New("namespace entity is no longer valid")
+	}
+	return ns, nil
+}
+
 // NewCache creates a new cache for JEDI.
 func NewCache(eng *engine.Engine) *reqcache.LRUCache {
 	return reqcache.NewLRUCache(CacheSize,
@@ -108,7 +134,7 @@ func NewCache(eng *engine.Engine) *reqcache.LRUCache {
 				for _, kr := range namespace.Keys {
 					wrapped, ok := kr.(*iapi.EntityKey_OAQUE_BLS12381_S20_Params)
 					if ok {
-						marshalled := wrapped.SerdesForm.Key.Content.([]byte)
+						marshalled := wrapped.SerdesForm.Key.Content.(serdes.EntityParamsOQAUE_BLS12381_s20)
 						if !params.Unmarshal(marshalled, true, false) {
 							continue
 						}
