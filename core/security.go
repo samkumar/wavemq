@@ -69,6 +69,7 @@ type AuthModule struct {
 	// State for JEDI
 	jediClientsLock sync.RWMutex
 	jediClients     map[string]*jedi.ClientState
+	jediPublicInfo  *jedistore.WAVEPublicInfo
 }
 
 type icacheKey struct {
@@ -113,13 +114,14 @@ func NewAuthModule(cfg *waved.Configuration) (*AuthModule, error) {
 	ws := poc.NewPOC(llsdb)
 	eapi := eapi.NewEAPI(ws)
 	return &AuthModule{
-		cfg:           cfg,
-		wave:          eapi,
-		icache:        make(map[icacheKey]*icacheItem),
-		bcache:        make(map[bcacheKey]*bcacheItem),
-		routingProofs: make(map[string][]byte),
-		phashcache:    make(map[uint32][]byte),
-		jediClients:   make(map[string]*jedi.ClientState),
+		cfg:            cfg,
+		wave:           eapi,
+		icache:         make(map[icacheKey]*icacheItem),
+		bcache:         make(map[bcacheKey]*bcacheItem),
+		routingProofs:  make(map[string][]byte),
+		phashcache:     make(map[uint32][]byte),
+		jediClients:    make(map[string]*jedi.ClientState),
+		jediPublicInfo: jedistore.NewWAVEPublicInfo(eapi.GetEngineNoPerspective()),
 	}, nil
 }
 
@@ -147,8 +149,8 @@ func (am *AuthModule) GetJEDIClient(ctx context.Context, perspective *eapipb.Per
 			if werr != nil {
 				return nil, werr
 			}
-			store := jedistore.NewWAVEKeyStore(am.wave, eng)
-			client = jedi.NewClientState(store, jediutils.WAVEPatternEncoderSingleton, 32<<20)
+			store := jedistore.NewWAVEKeyStore(eng)
+			client = jedi.NewClientState(am.jediPublicInfo, store, jediutils.WAVEPatternEncoderSingleton, 32<<20)
 			am.jediClients[mapkey] = client
 		}
 	}

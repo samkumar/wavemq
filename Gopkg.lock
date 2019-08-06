@@ -73,6 +73,14 @@
   revision = "8198c7b169ec28630587aded52777c5e10a037c2"
 
 [[projects]]
+  digest = "1:fd53b471edb4c28c7d297f617f4da0d33402755f58d6301e7ca1197ef0a90937"
+  name = "github.com/gogo/protobuf"
+  packages = ["proto"]
+  pruneopts = ""
+  revision = "ba06b47c162d49f2af050fb4c75bcbc86a159d5c"
+  version = "v1.2.1"
+
+[[projects]]
   branch = "master"
   digest = "1:107b233e45174dbab5b1324201d092ea9448e58243ab9f039e4c0f332e121e3a"
   name = "github.com/golang/glog"
@@ -211,7 +219,7 @@
 
 [[projects]]
   branch = "feature-jedi-delegation"
-  digest = "1:8953e4c084ac379f7303ae4a65ff468f4cd300479af397c1e8ac96772a264abc"
+  digest = "1:6f5db3c249a7507e6c2d425ee890b5994cb282aedf0dce932028b0f23301cf2c"
   name = "github.com/immesys/wave"
   packages = [
     "consts",
@@ -219,6 +227,7 @@
     "eapi/pb",
     "engine",
     "iapi",
+    "jedistore",
     "jediutils",
     "localdb/lls",
     "localdb/poc",
@@ -231,7 +240,7 @@
     "wve",
   ]
   pruneopts = ""
-  revision = "f6d3e1e1be9300c73215ff94a04bcfd1d1d69207"
+  revision = "3247c9c9e33a94370507b0399f6160f2058ea7a4"
   source = "github.com/samkumar/wave"
 
 [[projects]]
@@ -424,11 +433,11 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:51a23d9cf4dd655bf9ed3ac22dc92981fe497f4ae4b20665e3318e0fb46cbf88"
+  digest = "1:7f6264fd0fbad3c9b5c8cc9b43208c30eca1d6aadb6d13d08d4f3843765b669f"
   name = "github.com/ucbrise/jedi-protocol-go"
   packages = ["."]
   pruneopts = ""
-  revision = "0c76dc4f47f7106047c2e46e945019905efa4cf0"
+  revision = "fb4cd35aa58ccb3bb0ca271f1684213c9292c750"
 
 [[projects]]
   digest = "1:e85837cb04b78f61688c6eba93ea9d14f60d611e2aaf8319999b1a60d2dafbfa"
@@ -597,12 +606,15 @@
     "github.com/cloudflare/cfssl/log",
     "github.com/creachadair/cityhash",
     "github.com/dgraph-io/badger",
+    "github.com/gogo/protobuf/proto",
     "github.com/golang/protobuf/proto",
     "github.com/huichen/murmur",
     "github.com/immesys/wave/consts",
     "github.com/immesys/wave/eapi",
     "github.com/immesys/wave/eapi/pb",
     "github.com/immesys/wave/iapi",
+    "github.com/immesys/wave/jedistore",
+    "github.com/immesys/wave/jediutils",
     "github.com/immesys/wave/localdb/lls",
     "github.com/immesys/wave/localdb/poc",
     "github.com/immesys/wave/storage/overlay",
